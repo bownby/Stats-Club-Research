@@ -1,0 +1,73 @@
+---
+title: "FoodAPS Analysis 1"
+output: pdf_document
+date: "2026-10-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(MASS)
+```
+
+#Setup
+```{r}
+household <- read.csv("/Users/bryce/Downloads/Career/Stats Projects/CSV_data_files/faps_household_puf.csv")
+
+childcare <- household |>
+  dplyr::select(foodsufficient,expchildcare_r,famsize,adltfscat,foodsecureq2,schservebrkfst) |>
+  dplyr::filter(
+    !foodsufficient %in% c(-998,-997,-996),
+    !expchildcare_r %in% c(-998,-997,-997),
+    !schservebrkfst %in% c(-998,-997,-996))
+```
+
+#School Breakfast Provided
+```{r}
+#Difference in School Breakfast Provided
+childcare |>
+  mutate(schservebrkfst = factor(schservebrkfst, 
+                                  levels = c(1, 0), 
+                                  labels = c("Yes", "No"))) |>
+  ggplot(aes(x = schservebrkfst, fill = schservebrkfst)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), 
+            vjust = -0.5, size = 4) +
+  labs(
+    title = "School Breakfast Availability Among Households",
+    x = "School Serves Breakfast",
+    y = "Count"
+  ) +
+  scale_fill_manual(values = c("Yes" = "steelblue", "No" = "tomato")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+#Spending Based on School Breakfast Provided
+childcare |>
+  mutate(
+    spends_childcare = ifelse(expchildcare_r > 0, "Spends on childcare", "Does not spend"),
+    schservebrkfst = factor(schservebrkfst, levels = c(1, 2), labels = c("Yes", "No"))
+  ) |>
+  ggplot(aes(x = schservebrkfst, fill = spends_childcare)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Childcare Spending by School Breakfast Availability",
+    x = "School Serves Breakfast",
+    y = "Proportion",
+    fill = "Childcare Spending"
+  ) +
+  scale_fill_manual(values = c("Does not spend" = "steelblue",
+                                "Spends on childcare" = "tomato")) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+
+# Chi-square test
+chisq.test(table(childcare$schservebrkfst, childcare$expchildcare_r > 0))
+```
+
+
+#Childcare Access and Meals
+```{r}
+
+```
