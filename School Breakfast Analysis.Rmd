@@ -19,7 +19,8 @@ childcare <- household |>
   dplyr::filter(
     !foodsufficient %in% c(-998,-997,-996),
     !expchildcare_r %in% c(-998,-997,-997),
-    !schservebrkfst %in% c(-998,-997,-996))
+    !schservebrkfst %in% c(-998,-997,-996),
+    !schservebrkfst %in% c(-997))
 ```
 
 #School Breakfast Provided
@@ -47,7 +48,7 @@ childcare |>
 childcare |>
   mutate(
     spends_childcare = ifelse(expchildcare_r > 0, "Spends on childcare", "Does not spend"),
-    schservebrkfst = factor(schservebrkfst, levels = c(1, 2), labels = c("Yes", "No"))
+    schservebrkfst = factor(schservebrkfst, levels = c(1, 0), labels = c("Yes", "No"))
   ) |>
   ggplot(aes(x = schservebrkfst, fill = spends_childcare)) +
   geom_bar(position = "fill") +
@@ -67,7 +68,100 @@ chisq.test(table(childcare$schservebrkfst, childcare$expchildcare_r > 0))
 ```
 
 
-#Childcare Access and Meals
+#Food Security by School Breakfast Availability
 ```{r}
-
+childcare |>
+  mutate(schservebrkfst = factor(schservebrkfst, 
+                                  levels = c(1, 0), 
+                                  labels = c("Yes", "No"))) |>
+ ggplot(aes(x = schservebrkfst, y = foodsecureq2, fill = schservebrkfst)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Food Security Score by School Breakfast Availability",
+    x = "School Serves Breakfast",
+    y = "Food Security Score"
+  ) +
+  scale_fill_manual(values = c("Yes" = "steelblue", "No" = "tomato")) +
+  theme_minimal() +
+  theme(legend.position = "none")
 ```
+#Difference Testing
+```{r}
+# Split into two groups
+yes_breakfast <- childcare |> filter(schservebrkfst == 1) |> pull(foodsecureq2)
+no_breakfast  <- childcare |> filter(schservebrkfst == 0) |> pull(foodsecureq2)
+
+# --- Shapiro-Wilk Normality Tests ---
+shapiro.test(yes_breakfast)
+shapiro.test(no_breakfast)
+
+# --- QQ Plots ---
+childcare |>
+  mutate(schservebrkfst = factor(schservebrkfst,
+                                  levels = c(1, 0),
+                                  labels = c("Yes", "No"))) |>
+  ggplot(aes(sample = foodsecureq2, color = schservebrkfst)) +
+  geom_qq() +
+  geom_qq_line() +
+  facet_wrap(~schservebrkfst) +
+  labs(
+    title = "QQ Plot of Food Security Score by School Breakfast Availability",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  scale_color_manual(values = c("Yes" = "steelblue", "No" = "tomato")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# --- Wilcoxon Test ---
+wilcox.test(foodsecureq2 ~ schservebrkfst, data = childcare)
+
+#--- Chi-Sq. Test ---
+table(childcare$schservebrkfst, childcare$foodsecureq2)
+chisq.test(table(childcare$schservebrkfst, childcare$foodsecureq2))
+
+#Testing Direction of the Relationship -- Ordinal Outcome Linear Model
+fit <- MASS::polr(factor(foodsecureq2, ordered = TRUE) ~ schservebrkfst,
+           data = childcare, Hess = TRUE)
+
+ctable <- coef(summary(fit))
+p <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2
+cbind(ctable, "p value" = p)
+
+# Odds ratio with 95% CI
+exp(cbind(OR = coef(fit), confint(fit)))
+```
+
+#Comparison Based on Childcare Spending
+```{r}
+# Split into two groups
+spenders     <- childcare |> filter(expchildcare_r > 0)
+non_spenders <- childcare |> filter(expchildcare_r == 0)
+
+# --- Stratified Chi-Square Tests ---
+cat("=== Families Who Spend on Childcare ===\n")
+chisq.test(table(spenders$schservebrkfst, spenders$foodsecureq2))
+
+cat("\n=== Families Who Do Not Spend on Childcare ===\n")
+chisq.test(table(non_spenders$schservebrkfst, non_spenders$foodsecureq2))
+
+childcare |>
+  mutate(
+    spends_childcare = ifelse(expchildcare_r > 0, "Spends on childcare", "Does not spend"),
+    schservebrkfst = factor(schservebrkfst, levels = c(1, 0), labels = c("Yes", "No"))
+  ) %>%
+  ggplot(aes(x = schservebrkfst, fill = factor(foodsecureq2))) +
+  geom_bar(position = "fill") +
+  facet_wrap(~spends_childcare) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    title = "Food Security by School Breakfast Availability",
+    subtitle = "Stratified by Childcare Spending",
+    x = "School Serves Breakfast",
+    y = "Proportion",
+    fill = "Food Security Score"
+  ) +
+  theme_minimal()
+```
+
+
