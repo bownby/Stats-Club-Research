@@ -15,7 +15,7 @@ library(MASS)
 household <- read.csv("/Users/bryce/Downloads/Career/Stats Projects/CSV_data_files/faps_household_puf.csv")
 
 childcare <- household |>
-  dplyr::select(foodsufficient,expchildcare_r,famsize,adltfscat,foodsecureq2,schservebrkfst) |>
+  dplyr::select(foodsufficient,expchildcare_r,famsize,adltfscat,foodsecureq2,schservebrkfst,incfamreported_r) |>
   dplyr::filter(
     !foodsufficient %in% c(-998,-997,-996),
     !expchildcare_r %in% c(-998,-997,-997),
@@ -164,4 +164,58 @@ childcare |>
   theme_minimal()
 ```
 
+```{r}
+model_data <- childcare |>
+  filter(!foodsecureq2    %in% c(-998, -997, -996),
+         !schservebrkfst  %in% c(-998, -997, -996),
+         !expchildcare_r  %in% c(-998, -997, -996),
+         !incfamreported_r  %in% c(-998, -997, -996)) |>
+  mutate(
+    foodsec = factor(foodsecureq2, levels = c(1, 2, 3), ordered = TRUE),
+    brkfst  = factor(schservebrkfst, levels = c(1, 0), labels = c("Yes", "No")),
+    spends  = factor(expchildcare_r > 0, levels = c(FALSE, TRUE), labels = c("No", "Yes")),
+    income_k = incfamreported_r / 1000          # odds ratio per $1,000
+  ) %>%
+  filter(!is.na(foodsec), !is.na(brkfst), !is.na(income_k))
 
+# Model 0: intercept only
+m0 <- polr(foodsec ~ 1, data = model_data, Hess = TRUE)
+
+# Model 1: income only
+m1 <- polr(foodsec ~ income_k, data = model_data, Hess = TRUE)
+
+# Model 2: income + categorical predictors
+m2 <- polr(foodsec ~ income_k + brkfst, data = model_data, Hess = TRUE)
+
+# Likelihood ratio tests (each model nested in the next)
+anova(m0, m1, m2)
+
+# Information criteria (lower is better)
+AIC(m0, m1, m2)
+BIC(m0, m1, m2)
+
+ctable <- coef(summary(m2))
+p <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2
+cbind(round(ctable, 4), "p value" = signif(p, 3))
+
+
+model_names <- c("Intercept only",
+                 "Income",
+                 "Income + breakfast")
+
+lr <- anova(m0, m1, m2)
+
+comparison <- data.frame(
+  Model          = model_names,
+  Parameters     = AIC(m0, m1, m2)$df,
+  Resid_Deviance = round(lr$`Resid. Dev`, 2),
+  AIC            = round(AIC(m0, m1, m2)$AIC, 2),
+  BIC            = round(BIC(m0, m1, m2)$BIC, 2),
+  LR_stat        = round(c(NA, lr$`LR stat.`[-1]), 2),
+  LR_p           = c(NA, signif(lr$`Pr(Chi)`[-1], 3))
+) %>%
+  mutate(delta_AIC = round(AIC - min(AIC), 2),
+         delta_BIC = round(BIC - min(BIC), 2))
+
+comparison
+```
