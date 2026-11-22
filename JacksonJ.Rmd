@@ -1,0 +1,687 @@
+---
+title: "JacksonJ"
+output: html_document
+---
+
+required_packages <- c("haven", "dplyr", "ggplot2", "scales", "survey")
+
+missing_packages <- required_packages[
+    !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+    install.packages(missing_packages)
+}
+
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(survey)
+
+options(
+    survey.lonely.psu = "adjust",
+    survey.adjust.domain.lonely = TRUE
+)
+
+cat("Choose faps_individual_puf.sas7bdat, then faps_household_puf.sas7bdat.\n")
+
+paths <- c(file.choose(), file.choose())
+
+inputs <- lapply(paths, haven::read_sas)
+
+inputs <- lapply(inputs, function(x) {
+    names(x) <- tolower(names(x))
+    x
+})
+
+individual_index <- which(vapply(inputs, function(x) {
+    all(c(
+        "hhnum", "age_r", "healthstatus",
+        "bmicat", "hhwgt", "tsstrata", "tspsu"
+    ) %in% names(x))
+}, logical(1)))
+
+household_index <- which(vapply(inputs, function(x) {
+    all(c("hhnum", "adltfscat") %in% names(x))
+}, logical(1)))
+
+if (
+    length(individual_index) != 1 ||
+    length(household_index) != 1 ||
+    individual_index == household_index
+) {
+    stop("Choose exactly the individual and household FoodAPS SAS files.")
+}
+
+individual <- inputs[[individual_index]]
+household <- inputs[[household_index]]
+
+output_dir <- dirname(paths[individual_index])
+
+individual_data <- individual %>%
+    transmute(
+        hhnum = as.numeric(hhnum),
+        age = suppressWarnings(as.numeric(age_r)),
+        health = suppressWarnings(as.numeric(healthstatus)),
+        bmi = suppressWarnings(as.numeric(bmicat)),
+        weight = as.numeric(hhwgt),
+        stratum = as.numeric(tsstrata),
+        psu = as.numeric(tspsu)
+    )
+
+household_data <- household %>%
+    transmute(
+        hhnum = as.numeric(hhnum),
+        fs = suppressWarnings(as.numeric(adltfscat))
+    )
+
+if (anyDuplicated(household_data$hhnum)) {
+    stop("Household ID is not unique in the selected household dataset.")
+}
+
+fs_labels <- c(
+    "1 High",
+    "2 Marginal",
+    "3 Low",
+    "4 Very low"
+)
+
+health_labels <- c(
+    "1 Excellent",
+    "2 Very good",
+    "3 Good",
+    "4 Fair",
+    "5 Poor"
+)
+
+age_labels <- c(
+    "18-35",
+    "36-59",
+    "60-70",
+    "71+"
+)
+
+analysis_data <- individual_data %>%
+    inner_join(
+        household_data,
+        by = "hhnum"
+    ) %>%
+    filter(
+        !is.na(age),
+        age >= 18,
+        health %in% 1:5,
+        fs %in% 1:4,
+        !is.na(weight),
+        weight > 0,
+        !is.na(stratum),
+        !is.na(psu)
+    ) %>%
+    mutate(
+        poor_health = as.numeric(health %in% c(4, 5)),
+        bmi_cat = factor(
+            bmi,
+            levels = 1:3,
+            labels = c(
+                "Not overweight",
+                "Overweight",
+                "Obese"
+            )
+        ),
+        fs_cat = factor(
+            fs,
+            levels = 1:4,
+            labels = fs_labels
+        ),
+        health_cat = factor(
+            health,
+            levels = 1:5,
+            labels = health_labels
+        ),
+        age_group = case_when(
+            age %in% c(18, 19, 27.5) ~ "18-35",
+            age == 47.5 ~ "36-59",
+            age %in% c(62.5, 68) ~ "60-70",
+            age == 85 ~ "71+",
+            TRUE ~ NA_character_
+        ),
+        age_group = factor(
+            age_group,
+            levels = age_labels
+        )
+    )
+
+if (nrow(analysis_data) == 0) {
+    stop("No valid adult records were found.")
+}
+
+survey_design <- survey::svydesign(
+    ids = ~psu,
+    strata = ~stratum,
+    weights = ~weight,
+    nest = TRUE,
+    data = analysis_data
+)
+
+okabe_health <- c(
+    "1 Excellent" = rgb(213, 94, 0, maxColorValue = 255),
+    "2 Very good" = rgb(240, 228, 66, maxColorValue = 255),
+    "3 Good" = rgb(0, 158, 115, maxColorValue = 255),
+    "4 Fair" = rgb(86, 180, 233, maxColorValue = 255),
+    "5 Poor" = rgb(204, 121, 167, maxColorValue = 255)
+)
+
+okabe_fs <- c(
+    "1 High" = rgb(0, 114, 178, maxColorValue = 255),
+    "2 Marginal" = rgb(0, 158, 115, maxColorValue = 255),
+    "3 Low" = rgb(230, 159, 0, maxColorValue = 255),
+    "4 Very low" = rgb(204, 121, 167, maxColorValue = 255)
+)
+
+blue <- rgb(0, 114, 178, maxColorValue = 255)
+
+plot_theme <- theme_minimal(base_size = 14) +
+    theme(
+        plot.title = element_text(
+            face = "bold",
+            size = 18
+        ),
+        plot.subtitle = element_text(
+            size = 11,
+            color = "gray35"
+        ),
+        plot.caption = element_text(
+            size = 9,
+            color = "gray45",
+            hjust = 0
+        ),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_line(
+            color = "gray88",
+            linewidth = 0.35
+        ),
+        legend.position = "bottom",
+        legend.title = element_text(size = 11),
+        legend.text = element_text(size = 10),
+        axis.text = element_text(size = 11),
+        plot.margin = margin(18, 20, 14, 18)
+    )
+
+percent_summary <- function(design, variable) {
+    grouped <- survey::svyby(
+        ~poor_health,
+        stats::as.formula(paste0("~", variable)),
+        design = design,
+        FUN = survey::svymean,
+        na.rm = TRUE
+    )
+    
+    crit <- qt(
+        0.975,
+        df = survey::degf(design)
+    )
+    
+    estimate <- as.numeric(coef(grouped))
+    standard_error <- as.numeric(survey::SE(grouped))
+    
+    data.frame(
+        category = as.character(grouped[[variable]]),
+        estimate = estimate,
+        se = standard_error,
+        lower = pmax(
+            0,
+            estimate - crit * standard_error
+        ),
+        upper = pmin(
+            1,
+            estimate + crit * standard_error
+        )
+    )
+}
+
+p_label <- function(p) {
+    paste0(
+        "p = ",
+        format.pval(p, digits = 3, eps = 0.001)
+    )
+}
+
+save_plot <- function(plot, stem) {
+    print(plot)
+    
+    ggsave(
+        file.path(output_dir, paste0(stem, ".png")),
+        plot = plot,
+        width = 12,
+        height = 7.2,
+        dpi = 300,
+        bg = "white"
+    )
+    
+    ggsave(
+        file.path(output_dir, paste0(stem, ".pdf")),
+        plot = plot,
+        width = 12,
+        height = 7.2,
+        bg = "white"
+    )
+}
+
+bmi_design <- subset(
+    survey_design,
+    !is.na(bmi_cat)
+)
+
+bmi_results <- percent_summary(
+    bmi_design,
+    "bmi_cat"
+) %>%
+    mutate(
+        category = factor(
+            category,
+            levels = c(
+                "Not overweight",
+                "Overweight",
+                "Obese"
+            )
+        )
+    )
+
+bmi_fit <- survey::svyglm(
+    poor_health ~ bmi_cat,
+    design = bmi_design
+)
+
+bmi_anova <- survey::regTermTest(
+    bmi_fit,
+    ~bmi_cat
+)
+
+p14 <- ggplot(
+    bmi_results,
+    aes(
+        x = category,
+        y = estimate,
+        group = 1
+    )
+) +
+    geom_line(
+        color = blue,
+        linewidth = 1.1
+    ) +
+    geom_errorbar(
+        aes(
+            ymin = lower,
+            ymax = upper
+        ),
+        width = 0.12,
+        color = blue,
+        linewidth = 0.8
+    ) +
+    geom_point(
+        size = 3.5,
+        color = blue
+    ) +
+    scale_y_continuous(
+        labels = label_percent(accuracy = 1),
+        breaks = seq(0, 1, 0.10),
+        expand = expansion(mult = c(0, 0.04))
+    ) +
+    coord_cartesian(
+        ylim = c(
+            0,
+            max(
+                0.45,
+                ceiling(max(bmi_results$upper) * 10) / 10
+            )
+        )
+    ) +
+    labs(
+        title = "BMI Category and Fair or Poor Health",
+        subtitle = paste(
+            "Survey-weighted prevalence with 95% CI | One-way ANOVA:",
+            p_label(bmi_anova$p)
+        ),
+        x = "Adult BMI category",
+        y = "Adults reporting fair or poor health",
+        caption = "USDA FoodAPS | Design-based SEs | Fair/poor = HEALTHSTATUS 4 or 5"
+    ) +
+    plot_theme
+
+save_plot(
+    p14,
+    "slide14_BMI_one_way_ANOVA"
+)
+
+fs_results <- percent_summary(
+    survey_design,
+    "fs_cat"
+) %>%
+    mutate(
+        category = factor(
+            category,
+            levels = fs_labels
+        )
+    )
+
+fs_fit <- survey::svyglm(
+    poor_health ~ fs_cat,
+    design = survey_design
+)
+
+fs_anova <- survey::regTermTest(
+    fs_fit,
+    ~fs_cat
+)
+
+p15 <- ggplot(
+    fs_results,
+    aes(
+        x = category,
+        y = estimate,
+        group = 1
+    )
+) +
+    geom_line(
+        color = blue,
+        linewidth = 1.1
+    ) +
+    geom_errorbar(
+        aes(
+            ymin = lower,
+            ymax = upper
+        ),
+        width = 0.12,
+        color = blue,
+        linewidth = 0.8
+    ) +
+    geom_point(
+        size = 3.5,
+        color = blue
+    ) +
+    scale_y_continuous(
+        labels = label_percent(accuracy = 1),
+        breaks = seq(0, 1, 0.10),
+        expand = expansion(mult = c(0, 0.04))
+    ) +
+    coord_cartesian(
+        ylim = c(
+            0,
+            max(
+                0.55,
+                ceiling(max(fs_results$upper) * 10) / 10
+            )
+        )
+    ) +
+    labs(
+        title = "Food Security and Fair or Poor Health",
+        subtitle = paste(
+            "Survey-weighted prevalence with 95% CI | One-way ANOVA:",
+            p_label(fs_anova$p)
+        ),
+        x = "Adult household food-security category",
+        y = "Adults reporting fair or poor health",
+        caption = "USDA FoodAPS | Design-based SEs | Categories 1=high to 4=very low food security"
+    ) +
+    plot_theme
+
+save_plot(
+    p15,
+    "slide15_food_security_one_way_ANOVA"
+)
+
+health_stack <- analysis_data %>%
+    group_by(
+        fs_cat,
+        health_cat
+    ) %>%
+    summarise(
+        weighted_count = sum(weight),
+        .groups = "drop"
+    ) %>%
+    group_by(fs_cat) %>%
+    mutate(
+        percentage = weighted_count / sum(weighted_count)
+    ) %>%
+    ungroup()
+
+health_chisq <- survey::svychisq(
+    ~fs_cat + health_cat,
+    design = survey_design,
+    statistic = "F"
+)
+
+p16 <- ggplot(
+    health_stack,
+    aes(
+        x = fs_cat,
+        y = weighted_count,
+        fill = health_cat
+    )
+) +
+    geom_col(
+        position = "fill",
+        width = 0.78
+    ) +
+    scale_fill_manual(
+        values = okabe_health,
+        drop = FALSE
+    ) +
+    scale_y_continuous(
+        labels = label_percent(accuracy = 1),
+        breaks = seq(0, 1, 0.25),
+        expand = expansion(mult = c(0, 0))
+    ) +
+    coord_cartesian(
+        ylim = c(0, 1)
+    ) +
+    labs(
+        title = "Health Status Distribution by Food Security",
+        subtitle = paste(
+            "Survey-weighted composition | Rao-Scott association test:",
+            p_label(health_chisq$p.value)
+        ),
+        x = "Adult household food-security category",
+        y = "Percentage of adults",
+        fill = "Self-reported health",
+        caption = "USDA FoodAPS | Each column totals 100% | Okabe-Ito palette"
+    ) +
+    guides(
+        fill = guide_legend(nrow = 1)
+    ) +
+    plot_theme
+
+save_plot(
+    p16,
+    "slide16_health_distribution_100percent"
+)
+
+age_design <- subset(
+    survey_design,
+    !is.na(age_group)
+)
+
+interaction_fit <- survey::svyglm(
+    poor_health ~ age_group * fs_cat,
+    design = age_design,
+    family = quasibinomial()
+)
+
+interaction_test <- survey::regTermTest(
+    interaction_fit,
+    ~age_group:fs_cat
+)
+
+prediction_grid <- expand.grid(
+    age_group = factor(
+        age_labels,
+        levels = age_labels
+    ),
+    fs_cat = factor(
+        fs_labels,
+        levels = fs_labels
+    )
+)
+
+X <- model.matrix(
+    ~age_group * fs_cat,
+    data = prediction_grid
+)
+
+beta <- coef(interaction_fit)
+variance <- vcov(interaction_fit)
+
+eta <- as.vector(X %*% beta)
+
+se_eta <- sqrt(
+    pmax(
+        0,
+        rowSums((X %*% variance) * X)
+    )
+)
+
+crit <- qt(
+    0.975,
+    df = survey::degf(age_design)
+)
+
+prediction_grid <- prediction_grid %>%
+    mutate(
+        estimate = plogis(eta),
+        lower = plogis(eta - crit * se_eta),
+        upper = plogis(eta + crit * se_eta)
+    )
+
+p17 <- ggplot(
+    prediction_grid,
+    aes(
+        x = age_group,
+        y = estimate,
+        color = fs_cat,
+        group = fs_cat
+    )
+) +
+    geom_line(linewidth = 1.05) +
+    geom_errorbar(
+        aes(
+            ymin = lower,
+            ymax = upper
+        ),
+        width = 0.12,
+        linewidth = 0.75
+    ) +
+    geom_point(size = 2.8) +
+    scale_color_manual(
+        values = okabe_fs,
+        drop = FALSE
+    ) +
+    scale_y_continuous(
+        labels = label_percent(accuracy = 1),
+        breaks = seq(0, 1, 0.10),
+        expand = expansion(mult = c(0, 0.04))
+    ) +
+    coord_cartesian(
+        ylim = c(
+            0,
+            max(
+                0.65,
+                ceiling(max(prediction_grid$upper) * 10) / 10
+            )
+        )
+    ) +
+    labs(
+        title = "Fair or Poor Health by Age and Food Security",
+        subtitle = paste(
+            "Survey-weighted logistic regression | Age x food-security interaction:",
+            p_label(interaction_test$p)
+        ),
+        x = "Age band in FoodAPS public-use data",
+        y = "Model-predicted probability of fair or poor health",
+        color = "Food security",
+        caption = "USDA FoodAPS | 95% design-based CI | Imputed age=40 excluded from age models"
+    ) +
+    guides(
+        color = guide_legend(nrow = 1)
+    ) +
+    plot_theme
+
+save_plot(
+    p17,
+    "slide17_age_food_security_logistic_interaction"
+)
+
+write.csv(
+    bmi_results,
+    file.path(output_dir, "slide14_BMI_results.csv"),
+    row.names = FALSE
+)
+
+write.csv(
+    fs_results,
+    file.path(output_dir, "slide15_food_security_results.csv"),
+    row.names = FALSE
+)
+
+write.csv(
+    health_stack,
+    file.path(output_dir, "slide16_health_distribution_results.csv"),
+    row.names = FALSE
+)
+
+write.csv(
+    prediction_grid,
+    file.path(output_dir, "slide17_logistic_predictions.csv"),
+    row.names = FALSE
+)
+
+capture.output(
+    {
+        cat("SLIDE 14: SURVEY-WEIGHTED ONE-WAY ANOVA (BMI)\n")
+        print(bmi_anova)
+        
+        cat("\nSLIDE 15: SURVEY-WEIGHTED ONE-WAY ANOVA (FOOD SECURITY)\n")
+        print(fs_anova)
+        
+        cat("\nSLIDE 16: RAO-SCOTT HEALTH STATUS x FOOD SECURITY\n")
+        print(health_chisq)
+        
+        cat("\nSLIDE 17: SURVEY-WEIGHTED LOGISTIC AGE x FOOD SECURITY INTERACTION\n")
+        print(interaction_test)
+        
+        cat("\nMODEL SUMMARY\n")
+        print(summary(interaction_fit))
+        
+        cat(
+            "\nADULT SAMPLE: ",
+            nrow(analysis_data),
+            " records in ",
+            n_distinct(analysis_data$hhnum),
+            " households\n",
+            sep = ""
+        )
+        
+        cat(
+            "LOGISTIC MODEL SAMPLE: ",
+            nrow(model.frame(interaction_fit)),
+            "\n",
+            sep = ""
+        )
+    },
+    file = file.path(
+        output_dir,
+        "FoodAPS_statistical_tests.txt"
+    )
+)
+
+cat("Created four PNG charts, four PDFs, four CSV tables, and statistical tests in:\n")
+
+cat(output_dir, "\n")
+
+cat(
+    "Adult records:",
+    nrow(analysis_data),
+    "| Households:",
+    n_distinct(analysis_data$hhnum),
+    "\n"
+)
